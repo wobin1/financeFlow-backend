@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
+from functools import cached_property
 
 class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
@@ -36,7 +37,18 @@ class Settings(BaseSettings):
     
     # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
-    
+    CORS_ORIGINS: str = (
+        "http://localhost:3000,"
+        "http://127.0.0.1:3000,"
+        "https://finance-flow-frontend-nine.vercel.app"
+    )
+
+    @cached_property
+    def cors_origins(self) -> list[str]:
+        origins = {origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()}
+        origins.add(self.FRONTEND_URL)
+        return sorted(origins)
+
     class Config:
         env_file = ".env"
 
