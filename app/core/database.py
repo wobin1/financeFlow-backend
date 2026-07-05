@@ -3,9 +3,7 @@ import asyncio
 from typing import Dict, List, Any, Optional
 from contextlib import asynccontextmanager
 from app.core.config import settings
-import uuid
-from datetime import datetime, date
-import json
+from app.core.migrations import normalize_database_url, run_migrations
 
 class DatabaseService:
     """Raw SQL database service using asyncpg for better performance"""
@@ -17,7 +15,7 @@ class DatabaseService:
         """Initialize connection pool"""
         if not self.pool:
             self.pool = await asyncpg.create_pool(
-                settings.DATABASE_URL,
+                normalize_database_url(settings.DATABASE_URL),
                 min_size=5,
                 max_size=20,
                 command_timeout=60
@@ -71,6 +69,7 @@ db_service = DatabaseService()
 
 # Startup and shutdown events
 async def startup_db():
+    await asyncio.to_thread(run_migrations)
     await db_service.init_pool()
 
 async def shutdown_db():
