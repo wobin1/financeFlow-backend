@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     category VARCHAR(255),
     ai_confidence REAL,
     status transaction_status DEFAULT 'pending',
+    vat_deductible BOOLEAN,
+    wht_applicable BOOLEAN,
+    wht_rate NUMERIC(5, 2),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

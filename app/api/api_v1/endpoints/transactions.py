@@ -22,6 +22,9 @@ class TransactionCreate(BaseModel):
 class TransactionUpdate(BaseModel):
     status: Optional[str] = None
     category: Optional[str] = None
+    vat_deductible: Optional[bool] = None
+    wht_applicable: Optional[bool] = None
+    wht_rate: Optional[float] = None
 
 class TransactionResponse(BaseModel):
     id: str
@@ -33,6 +36,9 @@ class TransactionResponse(BaseModel):
     category: Optional[str]
     ai_confidence: Optional[float]
     status: str
+    vat_deductible: Optional[bool] = None
+    wht_applicable: Optional[bool] = None
+    wht_rate: Optional[float] = None
     created_at: str
 
 class TransactionSummary(BaseModel):
@@ -43,6 +49,27 @@ class TransactionSummary(BaseModel):
 
 class BulkCategoryUpdate(BaseModel):
     updates: List[dict]  # [{"transaction_id": "uuid", "category": "string"}]
+
+
+def _to_transaction_response(transaction: dict) -> TransactionResponse:
+    wht_rate = transaction.get("wht_rate")
+    vat_raw = transaction.get("vat_deductible")
+    wht_raw = transaction.get("wht_applicable")
+    return TransactionResponse(
+        id=str(transaction["id"]),
+        merchant_name=transaction["merchant_name"],
+        amount=float(transaction["amount"]),
+        currency=transaction["currency"],
+        transaction_date=transaction["transaction_date"],
+        raw_description=transaction["raw_description"],
+        category=transaction["category"],
+        ai_confidence=transaction["ai_confidence"],
+        status=transaction["status"],
+        vat_deductible=None if vat_raw is None else bool(vat_raw),
+        wht_applicable=None if wht_raw is None else bool(wht_raw),
+        wht_rate=float(wht_rate) if wht_rate is not None else None,
+        created_at=transaction["created_at"].isoformat(),
+    )
 
 @router.post("/", response_model=TransactionResponse)
 async def create_transaction(
@@ -62,18 +89,7 @@ async def create_transaction(
             plaid_transaction_id=transaction_data.plaid_transaction_id
         )
         
-        return TransactionResponse(
-            id=str(transaction['id']),
-            merchant_name=transaction['merchant_name'],
-            amount=float(transaction['amount']),
-            currency=transaction['currency'],
-            transaction_date=transaction['transaction_date'],
-            raw_description=transaction['raw_description'],
-            category=transaction['category'],
-            ai_confidence=transaction['ai_confidence'],
-            status=transaction['status'],
-            created_at=transaction['created_at'].isoformat()
-        )
+        return _to_transaction_response(transaction)
         
     except Exception as e:
         raise HTTPException(
@@ -103,21 +119,7 @@ async def get_transactions(
         end_date=end_date
     )
     
-    return [
-        TransactionResponse(
-            id=str(t['id']),
-            merchant_name=t['merchant_name'],
-            amount=float(t['amount']),
-            currency=t['currency'],
-            transaction_date=t['transaction_date'],
-            raw_description=t['raw_description'],
-            category=t['category'],
-            ai_confidence=t['ai_confidence'],
-            status=t['status'],
-            created_at=t['created_at'].isoformat()
-        )
-        for t in transactions
-    ]
+    return [_to_transaction_response(t) for t in transactions]
 
 @router.get("/{transaction_id}", response_model=TransactionResponse)
 async def get_transaction(
@@ -138,18 +140,7 @@ async def get_transaction(
                 detail="Transaction not found"
             )
         
-        return TransactionResponse(
-            id=str(transaction['id']),
-            merchant_name=transaction['merchant_name'],
-            amount=float(transaction['amount']),
-            currency=transaction['currency'],
-            transaction_date=transaction['transaction_date'],
-            raw_description=transaction['raw_description'],
-            category=transaction['category'],
-            ai_confidence=transaction['ai_confidence'],
-            status=transaction['status'],
-            created_at=transaction['created_at'].isoformat()
-        )
+        return _to_transaction_response(transaction)
         
     except ValueError:
         raise HTTPException(
@@ -170,6 +161,9 @@ async def update_transaction(
             transaction_id=ensure_uuid(transaction_id),
             status=update_data.status,
             category=update_data.category,
+            vat_deductible=update_data.vat_deductible,
+            wht_applicable=update_data.wht_applicable,
+            wht_rate=update_data.wht_rate,
             user_id=ensure_uuid(current_user['id'])
         )
         
@@ -179,18 +173,7 @@ async def update_transaction(
                 detail="Transaction not found"
             )
         
-        return TransactionResponse(
-            id=str(transaction['id']),
-            merchant_name=transaction['merchant_name'],
-            amount=float(transaction['amount']),
-            currency=transaction['currency'],
-            transaction_date=transaction['transaction_date'],
-            raw_description=transaction['raw_description'],
-            category=transaction['category'],
-            ai_confidence=transaction['ai_confidence'],
-            status=transaction['status'],
-            created_at=transaction['created_at'].isoformat()
-        )
+        return _to_transaction_response(transaction)
         
     except ValueError:
         raise HTTPException(

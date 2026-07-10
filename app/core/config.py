@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     MONO_PUBLIC_KEY: Optional[str] = None
     MONO_ENV: str = "test"  # test or live
     MONO_WEBHOOK_SECRET: Optional[str] = None
+    USE_MOCK_MONO: bool = False
     
     # Messaging
     TWILIO_SID: Optional[str] = None
