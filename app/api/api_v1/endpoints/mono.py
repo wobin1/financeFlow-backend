@@ -6,6 +6,11 @@ import uuid
 from app.api.api_v1.endpoints.auth import get_current_user
 from app.services.mono_service import MonoService
 from app.core.utils import ensure_uuid, uuid_to_str
+from app.services.entitlements import (
+    PlanLimitError,
+    assert_can_link_bank,
+    plan_limit_http,
+)
 
 router = APIRouter()
 
@@ -27,6 +32,12 @@ async def exchange_mono_token(
 ):
     """Exchange Mono authorization code for account access"""
     service = MonoService()
+    already_linked = bool(current_user.get("plaid_access_token"))
+
+    try:
+        await assert_can_link_bank(current_user, replacing=already_linked)
+    except PlanLimitError as e:
+        raise plan_limit_http(e)
     
     try:
         result = await service.exchange_token(

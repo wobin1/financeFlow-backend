@@ -8,7 +8,7 @@ from decimal import Decimal
 TX_COLUMNS = """
     id, user_id, plaid_transaction_id, merchant_name, amount,
     currency, transaction_date, raw_description, category,
-    ai_confidence, status, vat_deductible, wht_applicable, wht_rate,
+    ai_confidence, status, source, vat_deductible, wht_applicable, wht_rate,
     created_at, updated_at
 """
 
@@ -26,22 +26,52 @@ class TransactionService:
         description: str,
         transaction_date: date,
         currency: str = "NGN",
-        plaid_transaction_id: Optional[str] = None
+        plaid_transaction_id: Optional[str] = None,
+        source: str = "bank",
+        category: Optional[str] = None,
+        vat_deductible: Optional[bool] = None,
+        wht_applicable: Optional[bool] = None,
+        wht_rate: Optional[float] = None,
+        use_ai: bool = True,
     ) -> Dict[str, Any]:
-        """Create a new transaction with AI categorization"""
-        
-        # Get AI categorization
-        country = "NG" if currency == "NGN" else "US"
-        ai_result = await self.ai_service.categorize_transaction(
-            merchant_name=merchant_name,
-            description=description,
-            amount=amount,
-            currency=currency,
-            country=country
-        )
-        
-        # Determine status based on confidence
-        status = "confirmed" if ai_result["confidence"] > 0.9 else "pending"
+        """Create a new transaction.
+
+        Bank-synced entries use AI categorization when use_ai is True.
+        Manual entries use the caller-provided category and land as confirmed.
+        """
+        is_manual = source == "manual"
+
+        if is_manual:
+            if not category:
+                raise ValueError("Category is required for manual transactions")
+            final_category = category
+            ai_confidence = None
+            status = "confirmed"
+            final_vat = vat_deductible
+            final_wht = wht_applicable
+            final_wht_rate = Decimal(str(wht_rate)) if wht_applicable and wht_rate is not None else None
+        elif use_ai:
+            country = "NG" if currency == "NGN" else "US"
+            ai_result = await self.ai_service.categorize_transaction(
+                merchant_name=merchant_name,
+                description=description,
+                amount=amount,
+                currency=currency,
+                country=country
+            )
+            final_category = category or ai_result["category"]
+            ai_confidence = ai_result["confidence"]
+            status = "confirmed" if ai_result["confidence"] > 0.9 else "pending"
+            final_vat = vat_deductible
+            final_wht = wht_applicable
+            final_wht_rate = Decimal(str(wht_rate)) if wht_rate is not None else None
+        else:
+            final_category = category or "Uncategorized"
+            ai_confidence = None
+            status = "pending"
+            final_vat = vat_deductible
+            final_wht = wht_applicable
+            final_wht_rate = Decimal(str(wht_rate)) if wht_rate is not None else None
         
         transaction_id = uuid.uuid4()
         now = datetime.utcnow()
@@ -50,10 +80,10 @@ class TransactionService:
             INSERT INTO transactions (
                 id, user_id, plaid_transaction_id, merchant_name, amount,
                 currency, transaction_date, raw_description, category,
-                ai_confidence, status, vat_deductible, wht_applicable, wht_rate,
+                ai_confidence, status, source, vat_deductible, wht_applicable, wht_rate,
                 created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
             ) RETURNING {TX_COLUMNS}
         """
         
@@ -61,8 +91,8 @@ class TransactionService:
             query,
             transaction_id, user_id, plaid_transaction_id, merchant_name,
             Decimal(str(amount)), currency, transaction_date, description,
-            ai_result["category"], ai_result["confidence"], status,
-            None, None, None, now, now
+            final_category, ai_confidence, status, source,
+            final_vat, final_wht, final_wht_rate, now, now
         )
         
         return result
@@ -272,7 +302,7 @@ class TransactionService:
         # Recent transactions
         recent_query = """
             SELECT id, merchant_name, amount, currency, transaction_date,
-                   category, status, ai_confidence
+                   category, status, source, ai_confidence
             FROM transactions 
             WHERE user_id = $1
             ORDER BY transaction_date DESC, created_at DESC

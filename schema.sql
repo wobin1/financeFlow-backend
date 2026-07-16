@@ -21,6 +21,15 @@ CREATE TABLE IF NOT EXISTS users (
     business_type VARCHAR(100), -- Limited, Partnership, etc.
     country VARCHAR(10) DEFAULT 'NG',
     currency VARCHAR(10) DEFAULT 'NGN',
+
+    -- Billing / Paystack
+    plan VARCHAR(32) NOT NULL DEFAULT 'free',
+    subscription_status VARCHAR(32) NOT NULL DEFAULT 'active',
+    paystack_customer_code VARCHAR(64),
+    paystack_subscription_code VARCHAR(64),
+    paystack_authorization_code VARCHAR(64),
+    plan_period_end TIMESTAMP WITH TIME ZONE,
+    plan_updated_at TIMESTAMP WITH TIME ZONE,
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -33,6 +42,9 @@ CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);
 
 -- Transaction status enum
 CREATE TYPE transaction_status AS ENUM ('pending', 'confirmed', 'rejected', 'flagged');
+
+-- Transaction source enum (bank-synced vs manually entered)
+CREATE TYPE transaction_source AS ENUM ('bank', 'manual');
 
 -- Transactions table
 CREATE TABLE IF NOT EXISTS transactions (
@@ -49,6 +61,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     category VARCHAR(255),
     ai_confidence REAL,
     status transaction_status DEFAULT 'pending',
+    source transaction_source NOT NULL DEFAULT 'bank',
     vat_deductible BOOLEAN,
     wht_applicable BOOLEAN,
     wht_rate NUMERIC(5, 2),
@@ -70,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(user_id, t
 -- Composite indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_transactions_user_status ON transactions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_transactions_user_category ON transactions(user_id, category);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_source ON transactions(user_id, source);
 
 -- Message logs table (for SMS/WhatsApp integration)
 CREATE TABLE IF NOT EXISTS message_logs (
@@ -228,3 +242,24 @@ SELECT
 FROM transactions t
 WHERE t.category IS NOT NULL
 GROUP BY t.user_id, t.category;
+
+-- Billing events (Paystack audit log)
+CREATE TABLE IF NOT EXISTS billing_events (
+    id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    event_type VARCHAR(64) NOT NULL,
+    paystack_reference VARCHAR(128),
+    plan VARCHAR(32),
+    amount_kobo INTEGER,
+    payload JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_events_user_id ON billing_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_billing_events_reference ON billing_events(paystack_reference);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_events_activation_reference
+    ON billing_events(paystack_reference)
+    WHERE paystack_reference IS NOT NULL AND event_type = 'plan_activated';
+
+CREATE INDEX IF NOT EXISTS idx_users_plan ON users(plan);
+CREATE INDEX IF NOT EXISTS idx_users_subscription_status ON users(subscription_status);

@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     TERMII_SENDER_ID: Optional[str] = None
     TERMII_CHANNEL: Optional[str] = None
     
+    # Billing - Paystack
+    PAYSTACK_SECRET_KEY: Optional[str] = None
+    PAYSTACK_PUBLIC_KEY: Optional[str] = None
+    # Optional recurring plan codes from Paystack dashboard (monthly)
+    PAYSTACK_PLAN_STARTER: Optional[str] = None
+    PAYSTACK_PLAN_GROWTH: Optional[str] = None
+    PAYSTACK_PLAN_BUSINESS: Optional[str] = None
+
     # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
     CORS_ORIGINS: str = (

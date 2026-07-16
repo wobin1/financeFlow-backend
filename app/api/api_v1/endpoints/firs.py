@@ -6,6 +6,7 @@ from typing import Optional
 from app.api.api_v1.endpoints.auth import get_current_user
 from app.core.utils import ensure_uuid
 from app.services.firs_service import FirsService
+from app.services.entitlements import PlanLimitError, assert_feature, plan_limit_http
 
 router = APIRouter()
 
@@ -17,6 +18,11 @@ async def get_firs_filing_prep(
     month: Optional[int] = Query(default=None, ge=1, le=12),
 ):
     """Generate VAT, WHT, and CIT prep worksheets for a filing period."""
+    try:
+        assert_feature(current_user, "firs_access")
+    except PlanLimitError as e:
+        raise plan_limit_http(e)
+
     now = datetime.utcnow()
     filing_year = year or now.year
     filing_month = month or now.month
@@ -44,6 +50,11 @@ async def export_firs_prep_csv(
     month: Optional[int] = Query(default=None, ge=1, le=12),
 ):
     """Download FIRS prep worksheet as CSV."""
+    try:
+        assert_feature(current_user, "firs_export")
+    except PlanLimitError as e:
+        raise plan_limit_http(e)
+
     now = datetime.utcnow()
     filing_year = year or now.year
     filing_month = month or now.month

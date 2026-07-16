@@ -100,11 +100,21 @@ class MonoService:
     
     async def sync_transactions(self, user_id: uuid.UUID) -> Dict[str, Any]:
         """Sync transactions from Mono to our database"""
-        
+        from app.services.entitlements import (
+            PlanLimitError,
+            assert_can_create_transaction,
+            effective_plan,
+        )
+        from app.services.user_service import UserService
+
         # Get user's Mono account ID
         account_id = await self._get_user_mono_account(user_id)
         if not account_id:
             raise ValueError("User has no connected Mono account")
+
+        user = await UserService().get_user_by_id(user_id)
+        plan = effective_plan(user) if user else None
+        use_ai = bool(plan and plan.ai_categorization)
         
         # Get transactions from Mono
         mono_transactions = await self.get_transactions(account_id)
@@ -112,6 +122,7 @@ class MonoService:
         # Process and store transactions
         processed_count = 0
         skipped_count = 0
+        limit_reached = False
         errors = []
         
         for mono_tx in mono_transactions:
@@ -121,6 +132,14 @@ class MonoService:
                 if existing:
                     skipped_count += 1
                     continue
+
+                if user:
+                    try:
+                        await assert_can_create_transaction(user)
+                    except PlanLimitError as e:
+                        limit_reached = True
+                        errors.append(e.detail)
+                        break
                 
                 # Format transaction data
                 formatted_tx = self.format_transaction_for_processing(mono_tx)
@@ -133,7 +152,9 @@ class MonoService:
                     description=formatted_tx["raw_description"],
                     transaction_date=formatted_tx["transaction_date"],
                     currency=formatted_tx["currency"],
-                    plaid_transaction_id=formatted_tx["external_id"]
+                    plaid_transaction_id=formatted_tx["external_id"],
+                    source="bank",
+                    use_ai=use_ai,
                 )
                 
                 processed_count += 1
@@ -145,7 +166,9 @@ class MonoService:
         return {
             "processed": processed_count,
             "skipped": skipped_count,
+            "limit_reached": limit_reached,
             "errors": errors,
+            "ai_categorization": use_ai,
             "total_fetched": len(mono_transactions)
         }
     
