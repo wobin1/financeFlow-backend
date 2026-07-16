@@ -54,7 +54,7 @@ class BillingService:
         plan = get_plan(plan_id)
         user_id = str(user["id"])
         email = user["email"]
-        cb = callback_url or f"{settings.FRONTEND_URL.rstrip('/')}/billing?status=success"
+        cb = callback_url or f"{settings.FRONTEND_URL.rstrip('/')}/billing/success"
 
         payload: Dict[str, Any] = {
             "email": email,
