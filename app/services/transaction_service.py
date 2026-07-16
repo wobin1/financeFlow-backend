@@ -5,6 +5,13 @@ import uuid
 from datetime import datetime, date
 from decimal import Decimal
 
+TX_COLUMNS = """
+    id, user_id, plaid_transaction_id, merchant_name, amount,
+    currency, transaction_date, raw_description, category,
+    ai_confidence, status, source, vat_deductible, wht_applicable, wht_rate,
+    created_at, updated_at
+"""
+
 class TransactionService:
     """Transaction service using raw SQL queries"""
     
@@ -19,43 +26,73 @@ class TransactionService:
         description: str,
         transaction_date: date,
         currency: str = "NGN",
-        plaid_transaction_id: Optional[str] = None
+        plaid_transaction_id: Optional[str] = None,
+        source: str = "bank",
+        category: Optional[str] = None,
+        vat_deductible: Optional[bool] = None,
+        wht_applicable: Optional[bool] = None,
+        wht_rate: Optional[float] = None,
+        use_ai: bool = True,
     ) -> Dict[str, Any]:
-        """Create a new transaction with AI categorization"""
-        
-        # Get AI categorization
-        country = "NG" if currency == "NGN" else "US"
-        ai_result = await self.ai_service.categorize_transaction(
-            merchant_name=merchant_name,
-            description=description,
-            amount=amount,
-            currency=currency,
-            country=country
-        )
-        
-        # Determine status based on confidence
-        status = "confirmed" if ai_result["confidence"] > 0.9 else "pending"
+        """Create a new transaction.
+
+        Bank-synced entries use AI categorization when use_ai is True.
+        Manual entries use the caller-provided category and land as confirmed.
+        """
+        is_manual = source == "manual"
+
+        if is_manual:
+            if not category:
+                raise ValueError("Category is required for manual transactions")
+            final_category = category
+            ai_confidence = None
+            status = "confirmed"
+            final_vat = vat_deductible
+            final_wht = wht_applicable
+            final_wht_rate = Decimal(str(wht_rate)) if wht_applicable and wht_rate is not None else None
+        elif use_ai:
+            country = "NG" if currency == "NGN" else "US"
+            ai_result = await self.ai_service.categorize_transaction(
+                merchant_name=merchant_name,
+                description=description,
+                amount=amount,
+                currency=currency,
+                country=country
+            )
+            final_category = category or ai_result["category"]
+            ai_confidence = ai_result["confidence"]
+            status = "confirmed" if ai_result["confidence"] > 0.9 else "pending"
+            final_vat = vat_deductible
+            final_wht = wht_applicable
+            final_wht_rate = Decimal(str(wht_rate)) if wht_rate is not None else None
+        else:
+            final_category = category or "Uncategorized"
+            ai_confidence = None
+            status = "pending"
+            final_vat = vat_deductible
+            final_wht = wht_applicable
+            final_wht_rate = Decimal(str(wht_rate)) if wht_rate is not None else None
         
         transaction_id = uuid.uuid4()
         now = datetime.utcnow()
         
-        query = """
+        query = f"""
             INSERT INTO transactions (
                 id, user_id, plaid_transaction_id, merchant_name, amount,
                 currency, transaction_date, raw_description, category,
-                ai_confidence, status, created_at, updated_at
+                ai_confidence, status, source, vat_deductible, wht_applicable, wht_rate,
+                created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-            ) RETURNING id, user_id, merchant_name, amount, currency,
-                       transaction_date, raw_description, category,
-                       ai_confidence, status, created_at
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+            ) RETURNING {TX_COLUMNS}
         """
         
         result = await db_service.execute_one(
             query,
             transaction_id, user_id, plaid_transaction_id, merchant_name,
             Decimal(str(amount)), currency, transaction_date, description,
-            ai_result["category"], ai_result["confidence"], status, now, now
+            final_category, ai_confidence, status, source,
+            final_vat, final_wht, final_wht_rate, now, now
         )
         
         return result
@@ -99,9 +136,7 @@ class TransactionService:
         where_clause = " AND ".join(conditions)
         
         query = f"""
-            SELECT id, user_id, plaid_transaction_id, merchant_name, amount,
-                   currency, transaction_date, raw_description, category,
-                   ai_confidence, status, created_at, updated_at
+            SELECT {TX_COLUMNS}
             FROM transactions 
             WHERE {where_clause}
             ORDER BY transaction_date DESC, created_at DESC
@@ -120,19 +155,15 @@ class TransactionService:
         """Get single transaction by ID"""
         
         if user_id:
-            query = """
-                SELECT id, user_id, plaid_transaction_id, merchant_name, amount,
-                       currency, transaction_date, raw_description, category,
-                       ai_confidence, status, created_at, updated_at
+            query = f"""
+                SELECT {TX_COLUMNS}
                 FROM transactions 
                 WHERE id = $1 AND user_id = $2
             """
             return await db_service.execute_one(query, transaction_id, user_id)
         else:
-            query = """
-                SELECT id, user_id, plaid_transaction_id, merchant_name, amount,
-                       currency, transaction_date, raw_description, category,
-                       ai_confidence, status, created_at, updated_at
+            query = f"""
+                SELECT {TX_COLUMNS}
                 FROM transactions 
                 WHERE id = $1
             """
@@ -141,19 +172,47 @@ class TransactionService:
     async def update_transaction_status(
         self,
         transaction_id: uuid.UUID,
-        status: str,
+        status: Optional[str] = None,
         category: Optional[str] = None,
+        vat_deductible: Optional[bool] = None,
+        wht_applicable: Optional[bool] = None,
+        wht_rate: Optional[float] = None,
         user_id: Optional[uuid.UUID] = None
     ) -> Optional[Dict[str, Any]]:
-        """Update transaction status and optionally category"""
+        """Update transaction status, category, and tax flags"""
         
-        updates = ["status = $1", "updated_at = $2"]
-        params = [status, datetime.utcnow()]
-        param_count = 3
+        updates = ["updated_at = $1"]
+        params: List[Any] = [datetime.utcnow()]
+        param_count = 2
         
-        if category:
+        if status is not None:
+            updates.append(f"status = ${param_count}")
+            params.append(status)
+            param_count += 1
+        
+        if category is not None:
             updates.append(f"category = ${param_count}")
             params.append(category)
+            param_count += 1
+
+        if vat_deductible is not None:
+            updates.append(f"vat_deductible = ${param_count}")
+            params.append(vat_deductible)
+            param_count += 1
+
+        if wht_applicable is not None:
+            updates.append(f"wht_applicable = ${param_count}")
+            params.append(wht_applicable)
+            param_count += 1
+
+        if wht_rate is not None or wht_applicable is False:
+            updates.append(f"wht_rate = ${param_count}")
+            if wht_applicable is False:
+                params.append(None)
+            elif wht_rate is not None:
+                params.append(Decimal(str(wht_rate)))
+            else:
+                params.append(None)
             param_count += 1
         
         params.append(transaction_id)
@@ -168,9 +227,7 @@ class TransactionService:
             UPDATE transactions 
             SET {', '.join(updates)}
             WHERE {where_clause}
-            RETURNING id, user_id, merchant_name, amount, currency,
-                     transaction_date, raw_description, category,
-                     ai_confidence, status, created_at, updated_at
+            RETURNING {TX_COLUMNS}
         """
         
         return await db_service.execute_one(query, *params)
@@ -245,7 +302,7 @@ class TransactionService:
         # Recent transactions
         recent_query = """
             SELECT id, merchant_name, amount, currency, transaction_date,
-                   category, status, ai_confidence
+                   category, status, source, ai_confidence
             FROM transactions 
             WHERE user_id = $1
             ORDER BY transaction_date DESC, created_at DESC

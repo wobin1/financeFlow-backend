@@ -30,6 +30,12 @@ EXCEPTION
     WHEN duplicate_object THEN NULL;
 END $$;
 
+DO $$ BEGIN
+    CREATE TYPE transaction_source AS ENUM ('bank', 'manual');
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
+
 CREATE TABLE IF NOT EXISTS transactions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -42,6 +48,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     category VARCHAR(255),
     ai_confidence REAL,
     status transaction_status DEFAULT 'pending',
+    source transaction_source NOT NULL DEFAULT 'bank',
+    vat_deductible BOOLEAN,
+    wht_applicable BOOLEAN,
+    wht_rate NUMERIC(5, 2),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -55,6 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_transactions_plaid_id ON transactions(plaid_trans
 CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(user_id, transaction_date DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_user_status ON transactions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_transactions_user_category ON transactions(user_id, category);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_source ON transactions(user_id, source);
 
 CREATE TABLE IF NOT EXISTS message_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

@@ -58,6 +58,9 @@ class UserService:
             SELECT id, email, full_name, hashed_password, phone_number,
                    business_name, cac_number, tin_number, business_type,
                    country, currency, is_active, plaid_access_token,
+                   plan, subscription_status, paystack_customer_code,
+                   paystack_subscription_code, paystack_authorization_code,
+                   plan_period_end, plan_updated_at,
                    created_at, updated_at
             FROM users 
             WHERE email = $1
@@ -71,6 +74,9 @@ class UserService:
             SELECT id, email, full_name, phone_number, business_name,
                    cac_number, tin_number, business_type, country, 
                    currency, is_active, plaid_access_token,
+                   plan, subscription_status, paystack_customer_code,
+                   paystack_subscription_code, paystack_authorization_code,
+                   plan_period_end, plan_updated_at,
                    created_at, updated_at
             FROM users 
             WHERE id = $1

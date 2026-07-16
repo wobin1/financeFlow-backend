@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     MONO_PUBLIC_KEY: Optional[str] = None
     MONO_ENV: str = "test"  # test or live
     MONO_WEBHOOK_SECRET: Optional[str] = None
+    USE_MOCK_MONO: bool = False
     
     # Messaging
     TWILIO_SID: Optional[str] = None
@@ -35,12 +36,21 @@ class Settings(BaseSettings):
     TERMII_SENDER_ID: Optional[str] = None
     TERMII_CHANNEL: Optional[str] = None
     
+    # Billing - Paystack
+    PAYSTACK_SECRET_KEY: Optional[str] = None
+    PAYSTACK_PUBLIC_KEY: Optional[str] = None
+    # Optional recurring plan codes from Paystack dashboard (monthly)
+    PAYSTACK_PLAN_STARTER: Optional[str] = None
+    PAYSTACK_PLAN_GROWTH: Optional[str] = None
+    PAYSTACK_PLAN_BUSINESS: Optional[str] = None
+
     # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
     CORS_ORIGINS: str = (
         "http://localhost:3000,"
         "http://127.0.0.1:3000,"
-        "https://finance-flow-frontend-nine.vercel.app"
+        "https://finance-flow-frontend-nine.vercel.app,"
+        "https://financeflow.crimax.ng"
     )
 
     @cached_property

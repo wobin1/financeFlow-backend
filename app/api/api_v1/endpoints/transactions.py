@@ -7,6 +7,13 @@ import uuid
 from app.api.api_v1.endpoints.auth import get_current_user
 from app.services.transaction_service import TransactionService
 from app.core.utils import ensure_uuid, uuid_to_str
+from app.services.entitlements import (
+    PlanLimitError,
+    assert_can_create_transaction,
+    assert_feature,
+    effective_plan,
+    plan_limit_http,
+)
 
 router = APIRouter()
 
@@ -14,14 +21,22 @@ router = APIRouter()
 class TransactionCreate(BaseModel):
     merchant_name: str
     amount: float
-    description: str
+    description: str = ""
     transaction_date: date
     currency: str = "NGN"
     plaid_transaction_id: Optional[str] = None
+    source: str = "manual"
+    category: Optional[str] = None
+    vat_deductible: Optional[bool] = None
+    wht_applicable: Optional[bool] = None
+    wht_rate: Optional[float] = None
 
 class TransactionUpdate(BaseModel):
     status: Optional[str] = None
     category: Optional[str] = None
+    vat_deductible: Optional[bool] = None
+    wht_applicable: Optional[bool] = None
+    wht_rate: Optional[float] = None
 
 class TransactionResponse(BaseModel):
     id: str
@@ -33,6 +48,10 @@ class TransactionResponse(BaseModel):
     category: Optional[str]
     ai_confidence: Optional[float]
     status: str
+    source: str = "bank"
+    vat_deductible: Optional[bool] = None
+    wht_applicable: Optional[bool] = None
+    wht_rate: Optional[float] = None
     created_at: str
 
 class TransactionSummary(BaseModel):
@@ -44,37 +63,81 @@ class TransactionSummary(BaseModel):
 class BulkCategoryUpdate(BaseModel):
     updates: List[dict]  # [{"transaction_id": "uuid", "category": "string"}]
 
+
+def _to_transaction_response(transaction: dict) -> TransactionResponse:
+    wht_rate = transaction.get("wht_rate")
+    vat_raw = transaction.get("vat_deductible")
+    wht_raw = transaction.get("wht_applicable")
+    raw_desc = transaction.get("raw_description") or ""
+    return TransactionResponse(
+        id=str(transaction["id"]),
+        merchant_name=transaction["merchant_name"],
+        amount=float(transaction["amount"]),
+        currency=transaction["currency"],
+        transaction_date=transaction["transaction_date"],
+        raw_description=raw_desc,
+        category=transaction["category"],
+        ai_confidence=transaction["ai_confidence"],
+        status=transaction["status"],
+        source=transaction.get("source") or "bank",
+        vat_deductible=None if vat_raw is None else bool(vat_raw),
+        wht_applicable=None if wht_raw is None else bool(wht_raw),
+        wht_rate=float(wht_rate) if wht_rate is not None else None,
+        created_at=transaction["created_at"].isoformat(),
+    )
+
 @router.post("/", response_model=TransactionResponse)
 async def create_transaction(
     transaction_data: TransactionCreate,
     current_user: dict = Depends(get_current_user)
 ):
     service = TransactionService()
+    source = transaction_data.source if transaction_data.source in ("bank", "manual") else "manual"
+
+    if source == "manual" and not transaction_data.category:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Category is required for manual transactions",
+        )
+
+    if transaction_data.amount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Amount cannot be zero",
+        )
+
+    try:
+        await assert_can_create_transaction(current_user)
+    except PlanLimitError as e:
+        raise plan_limit_http(e)
+
+    plan = effective_plan(current_user)
+    use_ai = plan.ai_categorization and source != "manual"
     
     try:
         transaction = await service.create_transaction(
             user_id=ensure_uuid(current_user['id']),
-            merchant_name=transaction_data.merchant_name,
+            merchant_name=transaction_data.merchant_name.strip(),
             amount=transaction_data.amount,
-            description=transaction_data.description,
+            description=(transaction_data.description or "").strip() or transaction_data.merchant_name.strip(),
             transaction_date=transaction_data.transaction_date,
-            currency=transaction_data.currency,
-            plaid_transaction_id=transaction_data.plaid_transaction_id
+            currency=transaction_data.currency or current_user.get("currency") or "NGN",
+            plaid_transaction_id=transaction_data.plaid_transaction_id,
+            source=source,
+            category=transaction_data.category,
+            vat_deductible=transaction_data.vat_deductible,
+            wht_applicable=transaction_data.wht_applicable,
+            wht_rate=transaction_data.wht_rate,
+            use_ai=use_ai,
         )
         
-        return TransactionResponse(
-            id=str(transaction['id']),
-            merchant_name=transaction['merchant_name'],
-            amount=float(transaction['amount']),
-            currency=transaction['currency'],
-            transaction_date=transaction['transaction_date'],
-            raw_description=transaction['raw_description'],
-            category=transaction['category'],
-            ai_confidence=transaction['ai_confidence'],
-            status=transaction['status'],
-            created_at=transaction['created_at'].isoformat()
+        return _to_transaction_response(transaction)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
         )
-        
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -103,21 +166,7 @@ async def get_transactions(
         end_date=end_date
     )
     
-    return [
-        TransactionResponse(
-            id=str(t['id']),
-            merchant_name=t['merchant_name'],
-            amount=float(t['amount']),
-            currency=t['currency'],
-            transaction_date=t['transaction_date'],
-            raw_description=t['raw_description'],
-            category=t['category'],
-            ai_confidence=t['ai_confidence'],
-            status=t['status'],
-            created_at=t['created_at'].isoformat()
-        )
-        for t in transactions
-    ]
+    return [_to_transaction_response(t) for t in transactions]
 
 @router.get("/{transaction_id}", response_model=TransactionResponse)
 async def get_transaction(
@@ -138,18 +187,7 @@ async def get_transaction(
                 detail="Transaction not found"
             )
         
-        return TransactionResponse(
-            id=str(transaction['id']),
-            merchant_name=transaction['merchant_name'],
-            amount=float(transaction['amount']),
-            currency=transaction['currency'],
-            transaction_date=transaction['transaction_date'],
-            raw_description=transaction['raw_description'],
-            category=transaction['category'],
-            ai_confidence=transaction['ai_confidence'],
-            status=transaction['status'],
-            created_at=transaction['created_at'].isoformat()
-        )
+        return _to_transaction_response(transaction)
         
     except ValueError:
         raise HTTPException(
@@ -170,6 +208,9 @@ async def update_transaction(
             transaction_id=ensure_uuid(transaction_id),
             status=update_data.status,
             category=update_data.category,
+            vat_deductible=update_data.vat_deductible,
+            wht_applicable=update_data.wht_applicable,
+            wht_rate=update_data.wht_rate,
             user_id=ensure_uuid(current_user['id'])
         )
         
@@ -179,18 +220,7 @@ async def update_transaction(
                 detail="Transaction not found"
             )
         
-        return TransactionResponse(
-            id=str(transaction['id']),
-            merchant_name=transaction['merchant_name'],
-            amount=float(transaction['amount']),
-            currency=transaction['currency'],
-            transaction_date=transaction['transaction_date'],
-            raw_description=transaction['raw_description'],
-            category=transaction['category'],
-            ai_confidence=transaction['ai_confidence'],
-            status=transaction['status'],
-            created_at=transaction['created_at'].isoformat()
-        )
+        return _to_transaction_response(transaction)
         
     except ValueError:
         raise HTTPException(
@@ -267,6 +297,11 @@ async def get_spending_analytics(
     end_date: date,
     current_user: dict = Depends(get_current_user)
 ):
+    try:
+        assert_feature(current_user, "advanced_analytics")
+    except PlanLimitError as e:
+        raise plan_limit_http(e)
+
     service = TransactionService()
     
     analytics = await service.get_spending_analytics(
