@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
-from datetime import datetime
 from typing import Optional
 
 from app.api.api_v1.endpoints.auth import get_current_user
+from app.core.datetime_utils import utc_now
 from app.core.utils import ensure_uuid
 from app.services.firs_service import FirsService
 from app.services.entitlements import PlanLimitError, assert_feature, plan_limit_http
@@ -23,7 +23,7 @@ async def get_firs_filing_prep(
     except PlanLimitError as e:
         raise plan_limit_http(e)
 
-    now = datetime.utcnow()
+    now = utc_now()
     filing_year = year or now.year
     filing_month = month or now.month
 
@@ -39,7 +39,7 @@ async def get_firs_filing_prep(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate FIRS prep data: {str(e)}",
+            detail="Failed to generate FIRS prep data",
         )
 
 
@@ -55,7 +55,7 @@ async def export_firs_prep_csv(
     except PlanLimitError as e:
         raise plan_limit_http(e)
 
-    now = datetime.utcnow()
+    now = utc_now()
     filing_year = year or now.year
     filing_month = month or now.month
 
@@ -75,5 +75,5 @@ async def export_firs_prep_csv(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to export FIRS prep data: {str(e)}",
+            detail="Failed to export FIRS prep data",
         )

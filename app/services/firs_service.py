@@ -15,6 +15,7 @@ import re
 import uuid
 
 from app.core.database import db_service
+from app.core.datetime_utils import utc_now
 
 VAT_RATE = Decimal("0.075")
 CIT_RATE = Decimal("0.30")
@@ -112,8 +113,9 @@ def _decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
-def _money(value: Decimal) -> float:
-    return float(value.quantize(Decimal("0.01")))
+def _money(value: Decimal) -> str:
+    """Serialize money as a fixed 2-dp string (lossless on the wire)."""
+    return format(value.quantize(Decimal("0.01")), "f")
 
 
 def _period_bounds(year: int, month: int) -> tuple[date, date]:
@@ -234,18 +236,25 @@ class FirsService:
         user_id: uuid.UUID,
         start_date: date,
         end_date: date,
+        currency: str = "NGN",
     ) -> List[Dict[str, Any]]:
+        from app.core.currency import normalize_currency
+
+        currency = normalize_currency(currency)
         query = """
             SELECT id, merchant_name, amount, currency, transaction_date,
                    raw_description, category, status,
                    vat_deductible, wht_applicable, wht_rate
             FROM transactions
             WHERE user_id = $1
+              AND currency = $4
               AND transaction_date >= $2
               AND transaction_date <= $3
             ORDER BY transaction_date ASC, created_at ASC
         """
-        rows = await db_service.execute_query(query, user_id, start_date, end_date)
+        rows = await db_service.execute_query(
+            query, user_id, start_date, end_date, currency
+        )
         return [_serialize_transaction(row) for row in rows]
 
     def _build_vat_worksheet(
@@ -556,7 +565,10 @@ class FirsService:
     ) -> Dict[str, Any]:
         start_date, end_date = _period_bounds(year, month)
         profile = await self._get_user_profile(user_id)
-        transactions = await self._get_period_transactions(user_id, start_date, end_date)
+        currency = profile.get("currency") or "NGN"
+        transactions = await self._get_period_transactions(
+            user_id, start_date, end_date, currency=currency
+        )
 
         vat = self._build_vat_worksheet(transactions)
         wht = self._build_wht_worksheet(transactions)
@@ -593,7 +605,7 @@ class FirsService:
                 "Draft figures generated from bank transactions. "
                 "Review all values against invoices and FIRS guidelines before filing on TaxPro-Max."
             ),
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": utc_now().isoformat().replace("+00:00", "Z"),
         }
 
     async def export_csv(

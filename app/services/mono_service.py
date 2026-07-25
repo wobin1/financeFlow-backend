@@ -1,8 +1,10 @@
 import httpx
 from typing import Dict, List, Optional, Any
 from datetime import datetime, date
+from decimal import Decimal
 from app.core.config import settings
 from app.core.database import db_service
+from app.core.datetime_utils import utc_now
 from app.services.transaction_service import TransactionService
 import logging
 import uuid
@@ -219,17 +221,27 @@ class MonoService:
     
     def format_transaction_for_processing(self, mono_transaction: Dict[str, Any]) -> Dict[str, Any]:
         """Format Mono transaction data for our internal processing"""
+        from decimal import Decimal
+
+        from app.core.datetime_utils import as_lagos_date, parse_iso_to_utc
+
+        amount = Decimal(str(mono_transaction.get("amount", 0))) / Decimal("100")
+        balance_raw = mono_transaction.get("balance")
+        balance = (
+            Decimal(str(balance_raw)) / Decimal("100") if balance_raw is not None else None
+        )
+        raw_date = mono_transaction.get("date") or ""
+        transaction_date = as_lagos_date(parse_iso_to_utc(raw_date)) if raw_date else None
+
         return {
             "external_id": mono_transaction.get("_id"),
             "merchant_name": mono_transaction.get("narration", "Unknown"),
-            "amount": float(mono_transaction.get("amount", 0)) / 100,  # Mono returns kobo
+            "amount": amount,  # Mono returns kobo; keep Decimal (exact)
             "currency": "NGN",
-            "transaction_date": datetime.fromisoformat(
-                mono_transaction.get("date", "").replace("Z", "+00:00")
-            ).date(),
+            "transaction_date": transaction_date,
             "raw_description": mono_transaction.get("narration", ""),
             "transaction_type": mono_transaction.get("type", "debit"),
-            "balance": float(mono_transaction.get("balance", 0)) / 100 if mono_transaction.get("balance") else None,
+            "balance": balance,
             "category": mono_transaction.get("category"),
             "meta": {
                 "mono_transaction_id": mono_transaction.get("_id"),
@@ -238,18 +250,39 @@ class MonoService:
             }
         }
     
-    async def verify_webhook(self, payload: bytes, signature: str) -> bool:
-        """Verify Mono webhook signature"""
-        import hmac
+    async def verify_webhook(
+        self,
+        payload: bytes,
+        signature: str = "",
+        header_secret: str = "",
+    ) -> bool:
+        """Verify Mono webhook authenticity.
+
+        Official Mono docs send the configured webhook secret in the
+        `mono-webhook-secret` header for direct comparison. Also accept an
+        HMAC-SHA256 digest in `mono-webhook-signature` when present.
+        """
         import hashlib
-        
+        import hmac
+        import secrets as secrets_mod
+
+        webhook_secret = settings.MONO_WEBHOOK_SECRET
+        if not webhook_secret:
+            logger.error("MONO_WEBHOOK_SECRET is not configured")
+            return False
+
+        if header_secret:
+            return secrets_mod.compare_digest(str(header_secret), str(webhook_secret))
+
+        if not signature:
+            return False
+
         expected_signature = hmac.new(
-            self.secret_key.encode(),
+            webhook_secret.encode("utf-8"),
             payload,
-            hashlib.sha256
+            hashlib.sha256,
         ).hexdigest()
-        
-        return hmac.compare_digest(signature, expected_signature)
+        return secrets_mod.compare_digest(str(signature), expected_signature)
     
     # Private helper methods using raw SQL
     async def _store_mono_account(self, user_id: uuid.UUID, account_id: str) -> bool:
@@ -261,7 +294,7 @@ class MonoService:
         """
         
         result = await db_service.execute_command(
-            query, account_id, datetime.utcnow(), user_id
+            query, account_id, utc_now(), user_id
         )
         
         return "UPDATE 1" in result
@@ -298,7 +331,7 @@ class MonoService:
         """
         
         result = await db_service.execute_command(
-            query, datetime.utcnow(), account_id
+            query, utc_now(), account_id
         )
         
         return "UPDATE" in result
@@ -317,7 +350,9 @@ class MonoService:
             balance_info = await self.get_account_balance(account_id)
             
             # Get transaction summary from our database
-            tx_summary = await self.transaction_service.get_transaction_summary(user_id)
+            tx_summary = await self.transaction_service.get_transaction_summary(
+                user_id, currency="NGN"
+            )
             
             return {
                 "connected": True,
@@ -326,7 +361,7 @@ class MonoService:
                     "number": account_info.get("accountNumber"),
                     "bank": account_info.get("institution", {}).get("name"),
                     "type": account_info.get("type"),
-                    "balance": float(balance_info.get("balance", 0)) / 100,
+                    "balance": float(Decimal(str(balance_info.get("balance", 0))) / Decimal("100")),
                     "currency": "NGN"
                 },
                 "transactions": tx_summary

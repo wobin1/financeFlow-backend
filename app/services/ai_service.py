@@ -16,10 +16,14 @@ class AIService:
         merchant_name: str,
         description: str,
         amount: float,
-        country: str = "NG"
+        country: str = "NG",
+        currency: str | None = None,
     ) -> Dict[str, Any]:
-        """Categorize a transaction using AI"""
-        
+        """Categorize a transaction using AI.
+
+        `currency` is accepted for API compatibility with callers and included
+        in the model prompt when provided.
+        """
         # Country-specific categories
         if country == "NG":
             categories = [
@@ -61,6 +65,7 @@ class AIService:
 Merchant: {merchant_name}
 Description: {description}
 Amount: {amount}
+Currency: {currency or ("NGN" if country == "NG" else "USD")}
 Country: {country}
 
 Available categories: {', '.join(categories)}

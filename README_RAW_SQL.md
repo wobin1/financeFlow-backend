@@ -56,7 +56,8 @@ psql -d financeflow -f schema.sql
 Update your `.env` file:
 ```env
 DATABASE_URL=postgresql://postgres:password@localhost:5432/financeflow
-SECRET_KEY=your-secret-key-here
+SECRET_KEY=<generate with: python -c "import secrets; print(secrets.token_urlsafe(48))">
+# App rejects documented placeholders / keys shorter than 32 chars.
 GEMINI_API_KEY=your-gemini-api-key
 MONO_SECRET_KEY=your-mono-secret-key
 MONO_PUBLIC_KEY=your-mono-public-key
