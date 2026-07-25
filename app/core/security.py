@@ -143,3 +143,18 @@ def revoke_token(token: str) -> bool:
         return True
     except JWTError:
         return False
+
+
+def generate_url_token() -> str:
+    """Generate a high-entropy, URL-safe opaque token for email links."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_url_token(raw_token: str) -> str:
+    """Deterministically hash an opaque token for storage/lookup.
+
+    Tokens are already high-entropy random values, so a fast SHA-256 digest is
+    sufficient (and constant-length) for at-rest storage; the raw value is only
+    ever sent to the user's email.
+    """
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()

@@ -61,6 +61,23 @@ class Settings(BaseSettings):
     PAYSTACK_PLAN_GROWTH: Optional[str] = None
     PAYSTACK_PLAN_BUSINESS: Optional[str] = None
 
+    # Email — Zoho Mail REST API (OAuth2 self-client / refresh token)
+    EMAILS_ENABLED: bool = False
+    EMAIL_FROM_NAME: str = "FinanceFlow"
+    ZOHO_CLIENT_ID: Optional[str] = None
+    ZOHO_CLIENT_SECRET: Optional[str] = None
+    ZOHO_REFRESH_TOKEN: Optional[str] = None
+    # The Zoho mailbox that mail is sent from (e.g. no-reply@yourdomain.com)
+    ZOHO_FROM_ADDRESS: Optional[str] = None
+    # Optional: skip the accounts lookup by pinning the sending accountId
+    ZOHO_ACCOUNT_ID: Optional[str] = None
+    # Data-center specific hosts (.com, .eu, .in, .com.au, .jp)
+    ZOHO_ACCOUNTS_URL: str = "https://accounts.zoho.com"
+    ZOHO_MAIL_API_URL: str = "https://mail.zoho.com"
+    # Token lifetimes (minutes)
+    EMAIL_VERIFICATION_TTL_MINUTES: int = 60 * 24
+    PASSWORD_RESET_TTL_MINUTES: int = 30
+
     # Legacy setting retained for ops docs only — registration/login never auto-promote.
     # Grant admin via admin API or a one-off DB update.
     ADMIN_EMAILS: str = ""
