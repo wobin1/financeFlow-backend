@@ -1,5 +1,8 @@
--- FinanceFlow Database Schema
--- Raw SQL version for PostgreSQL
+-- FinanceFlow Database Schema (REFERENCE DUMP)
+-- Source of truth for schema changes: backend/migrations/*.sql
+-- Apply schema via app startup (custom runner) or:
+--   cd backend && python -c "from app.core.migrations import run_migrations; run_migrations()"
+-- Do not use Alembic — it is not configured for this project.
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -30,6 +33,9 @@ CREATE TABLE IF NOT EXISTS users (
     paystack_authorization_code VARCHAR(64),
     plan_period_end TIMESTAMP WITH TIME ZONE,
     plan_updated_at TIMESTAMP WITH TIME ZONE,
+
+    -- Admin
+    role VARCHAR(32) NOT NULL DEFAULT 'user',
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -39,6 +45,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
 CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 
 -- Transaction status enum
 CREATE TYPE transaction_status AS ENUM ('pending', 'confirmed', 'rejected', 'flagged');

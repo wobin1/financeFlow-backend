@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import uuid
 
@@ -11,12 +11,12 @@ router = APIRouter()
 
 # Pydantic models
 class UserUpdate(BaseModel):
-    full_name: Optional[str] = None
-    phone_number: Optional[str] = None
-    business_name: Optional[str] = None
-    cac_number: Optional[str] = None
-    tin_number: Optional[str] = None
-    business_type: Optional[str] = None
+    full_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    phone_number: Optional[str] = Field(default=None, max_length=50)
+    business_name: Optional[str] = Field(default=None, max_length=255)
+    cac_number: Optional[str] = Field(default=None, max_length=50)
+    tin_number: Optional[str] = Field(default=None, max_length=50)
+    business_type: Optional[str] = Field(default=None, max_length=100)
 
 class UserResponse(BaseModel):
     id: str
@@ -30,6 +30,7 @@ class UserResponse(BaseModel):
     country: str
     currency: str
     is_active: bool
+    role: str = "user"
 
 class PlaidTokenUpdate(BaseModel):
     access_token: str
@@ -49,7 +50,8 @@ async def get_user_profile(
         business_type=current_user['business_type'],
         country=current_user['country'],
         currency=current_user['currency'],
-        is_active=current_user['is_active']
+        is_active=current_user['is_active'],
+        role=current_user.get('role') or 'user',
     )
 
 @router.put("/profile", response_model=UserResponse)
@@ -87,13 +89,16 @@ async def update_user_profile(
             business_type=updated_user['business_type'],
             country=updated_user['country'],
             currency=updated_user['currency'],
-            is_active=updated_user['is_active']
+            is_active=updated_user['is_active'],
+            role=updated_user.get('role') or current_user.get('role') or 'user',
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update profile: {str(e)}"
+            detail="Failed to update profile"
         )
 
 @router.post("/plaid-token")
@@ -116,11 +121,13 @@ async def update_plaid_token(
             )
         
         return {"message": "Plaid token updated successfully"}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update Plaid token: {str(e)}"
+            detail="Failed to update bank token"
         )
 
 @router.post("/deactivate")
@@ -141,9 +148,11 @@ async def deactivate_account(
             )
         
         return {"message": "Account deactivated successfully"}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to deactivate account: {str(e)}"
+            detail="Failed to deactivate account"
         )

@@ -1,12 +1,17 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Query
-from pydantic import BaseModel
-from typing import List, Optional
-from datetime import date, datetime
-import uuid
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Annotated, List, Optional
+from datetime import date
+
+from fastapi import APIRouter, HTTPException, status, Depends, Query, Request
+from pydantic import BaseModel, Field, field_validator
 
 from app.api.api_v1.endpoints.auth import get_current_user
+from app.core.currency import normalize_currency
+from app.core.rate_limit import enforce_rate_limit
 from app.services.transaction_service import TransactionService
-from app.core.utils import ensure_uuid, uuid_to_str
+from app.core.utils import ensure_uuid
 from app.services.entitlements import (
     PlanLimitError,
     assert_can_create_transaction,
@@ -17,31 +22,50 @@ from app.services.entitlements import (
 
 router = APIRouter()
 
-# Pydantic models
+MoneyAmount = Annotated[Decimal, Field(max_digits=12, decimal_places=2)]
+WhtRate = Annotated[Decimal, Field(ge=0, le=100, max_digits=5, decimal_places=2)]
+
+
 class TransactionCreate(BaseModel):
-    merchant_name: str
-    amount: float
-    description: str = ""
+    merchant_name: str = Field(..., min_length=1, max_length=255)
+    amount: MoneyAmount
+    description: str = Field(default="", max_length=2000)
     transaction_date: date
-    currency: str = "NGN"
-    plaid_transaction_id: Optional[str] = None
-    source: str = "manual"
-    category: Optional[str] = None
+    currency: str = Field(default="NGN", max_length=10)
+    plaid_transaction_id: Optional[str] = Field(default=None, max_length=255)
+    source: str = Field(default="manual", max_length=20)
+    category: Optional[str] = Field(default=None, max_length=100)
     vat_deductible: Optional[bool] = None
     wht_applicable: Optional[bool] = None
-    wht_rate: Optional[float] = None
+    wht_rate: Optional[WhtRate] = None
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return normalize_currency(value)
+
+    @field_validator("amount")
+    @classmethod
+    def amount_not_zero(cls, value: Decimal) -> Decimal:
+        if value == 0:
+            raise ValueError("Amount cannot be zero")
+        if abs(value) >= Decimal("10000000000"):
+            raise ValueError("Amount exceeds supported range")
+        return value
+
 
 class TransactionUpdate(BaseModel):
-    status: Optional[str] = None
-    category: Optional[str] = None
+    status: Optional[str] = Field(default=None, max_length=20)
+    category: Optional[str] = Field(default=None, max_length=100)
     vat_deductible: Optional[bool] = None
     wht_applicable: Optional[bool] = None
-    wht_rate: Optional[float] = None
+    wht_rate: Optional[WhtRate] = None
+
 
 class TransactionResponse(BaseModel):
     id: str
     merchant_name: str
-    amount: float
+    amount: MoneyAmount
     currency: str
     transaction_date: date
     raw_description: str
@@ -51,17 +75,25 @@ class TransactionResponse(BaseModel):
     source: str = "bank"
     vat_deductible: Optional[bool] = None
     wht_applicable: Optional[bool] = None
-    wht_rate: Optional[float] = None
+    wht_rate: Optional[MoneyAmount] = None
     created_at: str
+
 
 class TransactionSummary(BaseModel):
     summary: dict
+    currency: str = "NGN"
     categories: List[dict]
     monthly_trends: List[dict]
     recent_transactions: List[dict]
 
+
+class BulkCategoryItem(BaseModel):
+    transaction_id: str = Field(..., min_length=1, max_length=36)
+    category: str = Field(..., min_length=1, max_length=100)
+
+
 class BulkCategoryUpdate(BaseModel):
-    updates: List[dict]  # [{"transaction_id": "uuid", "category": "string"}]
+    updates: List[BulkCategoryItem] = Field(..., min_length=1, max_length=500)
 
 
 def _to_transaction_response(transaction: dict) -> TransactionResponse:
@@ -72,7 +104,7 @@ def _to_transaction_response(transaction: dict) -> TransactionResponse:
     return TransactionResponse(
         id=str(transaction["id"]),
         merchant_name=transaction["merchant_name"],
-        amount=float(transaction["amount"]),
+        amount=Decimal(str(transaction["amount"])),
         currency=transaction["currency"],
         transaction_date=transaction["transaction_date"],
         raw_description=raw_desc,
@@ -82,15 +114,17 @@ def _to_transaction_response(transaction: dict) -> TransactionResponse:
         source=transaction.get("source") or "bank",
         vat_deductible=None if vat_raw is None else bool(vat_raw),
         wht_applicable=None if wht_raw is None else bool(wht_raw),
-        wht_rate=float(wht_rate) if wht_rate is not None else None,
+        wht_rate=Decimal(str(wht_rate)) if wht_rate is not None else None,
         created_at=transaction["created_at"].isoformat(),
     )
 
 @router.post("/", response_model=TransactionResponse)
 async def create_transaction(
     transaction_data: TransactionCreate,
+    request: Request,
     current_user: dict = Depends(get_current_user)
 ):
+    enforce_rate_limit(request, bucket="tx-create", limit=30, window_seconds=60)
     service = TransactionService()
     source = transaction_data.source if transaction_data.source in ("bank", "manual") else "manual"
 
@@ -98,12 +132,6 @@ async def create_transaction(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Category is required for manual transactions",
-        )
-
-    if transaction_data.amount == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Amount cannot be zero",
         )
 
     try:
@@ -141,7 +169,7 @@ async def create_transaction(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create transaction: {str(e)}"
+            detail="Failed to create transaction"
         )
 
 @router.get("/", response_model=List[TransactionResponse])
@@ -262,7 +290,8 @@ async def get_transaction_summary(
     service = TransactionService()
     
     summary_data = await service.get_transaction_summary(
-        user_id=ensure_uuid(current_user['id'])
+        user_id=ensure_uuid(current_user['id']),
+        currency=current_user.get("currency") or "NGN",
     )
     
     return TransactionSummary(**summary_data)
@@ -277,7 +306,7 @@ async def bulk_update_categories(
     try:
         updated_count = await service.bulk_update_categories(
             user_id=ensure_uuid(current_user['id']),
-            updates=bulk_update.updates
+            updates=[item.model_dump() for item in bulk_update.updates],
         )
         
         return {
@@ -288,7 +317,7 @@ async def bulk_update_categories(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update categories: {str(e)}"
+            detail="Failed to update categories"
         )
 
 @router.get("/analytics/spending")
@@ -307,7 +336,8 @@ async def get_spending_analytics(
     analytics = await service.get_spending_analytics(
         user_id=ensure_uuid(current_user['id']),
         start_date=start_date,
-        end_date=end_date
+        end_date=end_date,
+        currency=current_user.get("currency") or "NGN",
     )
     
     return analytics

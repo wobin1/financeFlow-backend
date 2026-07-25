@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 import uuid
 
 from fastapi import HTTPException, status
 
 from app.core.database import db_service
+from app.core.datetime_utils import to_aware_utc, utc_now
 from app.core.plans import Plan, get_plan
 
 
@@ -21,12 +21,6 @@ class PlanLimitError(Exception):
         super().__init__(detail)
 
 
-def _as_naive_utc(value: datetime) -> datetime:
-    if getattr(value, "tzinfo", None) is not None:
-        return value.replace(tzinfo=None)
-    return value
-
-
 def effective_plan(user: Dict[str, Any]) -> Plan:
     """Resolve the user's active plan, downgrading expired paid access to free."""
     plan_id = user.get("plan") or "free"
@@ -35,13 +29,13 @@ def effective_plan(user: Dict[str, Any]) -> Plan:
 
     status_value = (user.get("subscription_status") or "active").lower()
     period_end = user.get("plan_period_end")
-    now = datetime.utcnow()
+    now = utc_now()
 
     if status_value == "active":
         return get_plan(plan_id)
 
     # Cancelled / past_due keep access until period end
-    if period_end and _as_naive_utc(period_end) > now:
+    if period_end and to_aware_utc(period_end) > now:
         return get_plan(plan_id)
 
     return get_plan("free")

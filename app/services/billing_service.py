@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
+import asyncpg
 import httpx
 
 from app.core.config import settings
 from app.core.database import db_service
+from app.core.datetime_utils import parse_iso_to_utc, utc_now
+from app.core.logging_utils import redact_sensitive
 from app.core.plans import PAID_PLAN_IDS, PLANS, get_plan
 
 logger = logging.getLogger(__name__)
@@ -192,7 +196,7 @@ class BillingService:
         if plan.id == "free":
             raise ValueError("Cannot activate free via Paystack")
 
-        # Idempotent: skip if this payment already activated a plan
+        # Fast-path idempotency check
         if reference:
             existing = await db_service.execute_one(
                 """
@@ -202,22 +206,7 @@ class BillingService:
                 reference,
             )
             if existing:
-                user = await db_service.execute_one(
-                    """
-                    SELECT id, email, plan, subscription_status, plan_period_end,
-                           paystack_customer_code, paystack_subscription_code
-                    FROM users WHERE id = $1
-                    """,
-                    user_id,
-                )
-                return {
-                    "already_processed": True,
-                    "plan": get_plan(user.get("plan") if user else plan_id).to_dict(),
-                    "subscription_status": user.get("subscription_status") if user else "active",
-                    "plan_period_end": user.get("plan_period_end").isoformat()
-                    if user and user.get("plan_period_end")
-                    else None,
-                }
+                return await self._activation_result(user_id, plan_id, already_processed=True)
 
         customer = paystack_data.get("customer") or {}
         authorization = paystack_data.get("authorization") or {}
@@ -228,42 +217,93 @@ class BillingService:
             or (paystack_data.get("subscription") or {}).get("subscription_code")
         )
 
-        period_end = datetime.utcnow() + timedelta(days=30)
-        # Prefer Paystack next_payment_date when present
+        period_end = utc_now() + timedelta(days=30)
         next_payment = paystack_data.get("next_payment_date")
         if next_payment:
             try:
-                period_end = datetime.fromisoformat(str(next_payment).replace("Z", "+00:00")).replace(
-                    tzinfo=None
-                )
+                period_end = parse_iso_to_utc(str(next_payment))
             except ValueError:
                 pass
 
-        await self._update_subscription(
-            user_id=user_id,
-            plan=plan_id,
-            subscription_status="active",
-            period_end=period_end,
-            customer_code=customer_code,
-            subscription_code=subscription_code,
-            authorization_code=auth_code,
-        )
-
         amount = paystack_data.get("amount")
-        await self._log_event(
-            user_id=user_id,
-            event_type="plan_activated",
-            reference=reference,
-            plan=plan_id,
-            amount_kobo=int(amount) if amount is not None else plan.amount_kobo,
-            payload=paystack_data,
-        )
+        amount_kobo = int(amount) if amount is not None else plan.amount_kobo
+        now = utc_now()
+        event_id = uuid.uuid4()
+
+        try:
+            async with db_service.transaction() as conn:
+                # Insert activation event first — unique index is the race guard.
+                await conn.execute(
+                    """
+                    INSERT INTO billing_events (
+                        id, user_id, event_type, paystack_reference, plan,
+                        amount_kobo, payload, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                    """,
+                    event_id,
+                    user_id,
+                    "plan_activated",
+                    reference,
+                    plan_id,
+                    amount_kobo,
+                    json.dumps(redact_sensitive(paystack_data), default=str),
+                    now,
+                )
+                await conn.execute(
+                    """
+                    UPDATE users SET
+                        plan = $1,
+                        subscription_status = $2,
+                        plan_period_end = $3,
+                        paystack_customer_code = COALESCE($4, paystack_customer_code),
+                        paystack_subscription_code = COALESCE($5, paystack_subscription_code),
+                        paystack_authorization_code = COALESCE($6, paystack_authorization_code),
+                        plan_updated_at = $7,
+                        updated_at = $7
+                    WHERE id = $8
+                    """,
+                    plan_id,
+                    "active",
+                    period_end,
+                    customer_code,
+                    subscription_code,
+                    auth_code,
+                    now,
+                    user_id,
+                )
+        except asyncpg.UniqueViolationError:
+            # Concurrent duplicate webhook/verify — treat as already processed.
+            return await self._activation_result(user_id, plan_id, already_processed=True)
 
         return {
             "already_processed": False,
             "plan": plan.to_dict(),
             "subscription_status": "active",
             "plan_period_end": period_end.isoformat(),
+        }
+
+    async def _activation_result(
+        self,
+        user_id: uuid.UUID,
+        plan_id: str,
+        *,
+        already_processed: bool,
+    ) -> Dict[str, Any]:
+        user = await db_service.execute_one(
+            """
+            SELECT id, email, plan, subscription_status, plan_period_end,
+                   paystack_customer_code, paystack_subscription_code
+            FROM users WHERE id = $1
+            """,
+            user_id,
+        )
+        return {
+            "already_processed": already_processed,
+            "plan": get_plan(user.get("plan") if user else plan_id).to_dict(),
+            "subscription_status": user.get("subscription_status") if user else "active",
+            "plan_period_end": user.get("plan_period_end").isoformat()
+            if user and user.get("plan_period_end")
+            else None,
         }
 
     async def cancel_subscription(self, user: Dict[str, Any]) -> Dict[str, Any]:
@@ -301,7 +341,7 @@ class BillingService:
             user_id=user_id,
             plan=user.get("plan") or "free",
             subscription_status="cancelled",
-            period_end=user.get("plan_period_end") or datetime.utcnow() + timedelta(days=1),
+            period_end=user.get("plan_period_end") or utc_now() + timedelta(days=1),
             customer_code=user.get("paystack_customer_code"),
             subscription_code=sub_code,
             authorization_code=user.get("paystack_authorization_code"),
@@ -319,7 +359,7 @@ class BillingService:
         return {
             "message": "Subscription cancelled. Access continues until the current period ends.",
             "subscription_status": "cancelled",
-            "plan_period_end": (user.get("plan_period_end") or datetime.utcnow()).isoformat()
+            "plan_period_end": (user.get("plan_period_end") or utc_now()).isoformat()
             if isinstance(user.get("plan_period_end"), datetime)
             else user.get("plan_period_end"),
         }
@@ -423,7 +463,7 @@ class BillingService:
             customer_code,
             subscription_code,
             authorization_code,
-            datetime.utcnow(),
+            utc_now(),
             user_id,
         )
 
@@ -437,8 +477,6 @@ class BillingService:
         amount_kobo: Optional[int],
         payload: Any,
     ) -> None:
-        import json
-
         try:
             await db_service.execute_command(
                 """
@@ -452,8 +490,8 @@ class BillingService:
                 reference,
                 plan,
                 amount_kobo,
-                json.dumps(payload, default=str),
-                datetime.utcnow(),
+                json.dumps(redact_sensitive(payload), default=str),
+                utc_now(),
             )
         except Exception:
             logger.exception("Failed to log billing event")

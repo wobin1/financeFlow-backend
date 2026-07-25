@@ -1,5 +1,7 @@
 from typing import List, Optional, Dict, Any
 from app.core.database import db_service
+from app.core.currency import DEFAULT_CURRENCY, normalize_currency
+from app.core.datetime_utils import utc_now
 from app.services.ai_service import AIService
 import uuid
 from datetime import datetime, date
@@ -22,7 +24,7 @@ class TransactionService:
         self,
         user_id: uuid.UUID,
         merchant_name: str,
-        amount: float,
+        amount,
         description: str,
         transaction_date: date,
         currency: str = "NGN",
@@ -31,7 +33,7 @@ class TransactionService:
         category: Optional[str] = None,
         vat_deductible: Optional[bool] = None,
         wht_applicable: Optional[bool] = None,
-        wht_rate: Optional[float] = None,
+        wht_rate=None,
         use_ai: bool = True,
     ) -> Dict[str, Any]:
         """Create a new transaction.
@@ -40,6 +42,8 @@ class TransactionService:
         Manual entries use the caller-provided category and land as confirmed.
         """
         is_manual = source == "manual"
+        currency = normalize_currency(currency)
+        amount_dec = amount if isinstance(amount, Decimal) else Decimal(str(amount))
 
         if is_manual:
             if not category:
@@ -49,33 +53,45 @@ class TransactionService:
             status = "confirmed"
             final_vat = vat_deductible
             final_wht = wht_applicable
-            final_wht_rate = Decimal(str(wht_rate)) if wht_applicable and wht_rate is not None else None
+            final_wht_rate = (
+                (wht_rate if isinstance(wht_rate, Decimal) else Decimal(str(wht_rate)))
+                if wht_applicable and wht_rate is not None
+                else None
+            )
         elif use_ai:
             country = "NG" if currency == "NGN" else "US"
             ai_result = await self.ai_service.categorize_transaction(
                 merchant_name=merchant_name,
                 description=description,
-                amount=amount,
+                amount=float(amount_dec),
                 currency=currency,
-                country=country
+                country=country,
             )
             final_category = category or ai_result["category"]
             ai_confidence = ai_result["confidence"]
             status = "confirmed" if ai_result["confidence"] > 0.9 else "pending"
             final_vat = vat_deductible
             final_wht = wht_applicable
-            final_wht_rate = Decimal(str(wht_rate)) if wht_rate is not None else None
+            final_wht_rate = (
+                (wht_rate if isinstance(wht_rate, Decimal) else Decimal(str(wht_rate)))
+                if wht_rate is not None
+                else None
+            )
         else:
             final_category = category or "Uncategorized"
             ai_confidence = None
             status = "pending"
             final_vat = vat_deductible
             final_wht = wht_applicable
-            final_wht_rate = Decimal(str(wht_rate)) if wht_rate is not None else None
-        
+            final_wht_rate = (
+                (wht_rate if isinstance(wht_rate, Decimal) else Decimal(str(wht_rate)))
+                if wht_rate is not None
+                else None
+            )
+
         transaction_id = uuid.uuid4()
-        now = datetime.utcnow()
-        
+        now = utc_now()
+
         query = f"""
             INSERT INTO transactions (
                 id, user_id, plaid_transaction_id, merchant_name, amount,
@@ -86,15 +102,28 @@ class TransactionService:
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
             ) RETURNING {TX_COLUMNS}
         """
-        
+
         result = await db_service.execute_one(
             query,
-            transaction_id, user_id, plaid_transaction_id, merchant_name,
-            Decimal(str(amount)), currency, transaction_date, description,
-            final_category, ai_confidence, status, source,
-            final_vat, final_wht, final_wht_rate, now, now
+            transaction_id,
+            user_id,
+            plaid_transaction_id,
+            merchant_name,
+            amount_dec,
+            currency,
+            transaction_date,
+            description,
+            final_category,
+            ai_confidence,
+            status,
+            source,
+            final_vat,
+            final_wht,
+            final_wht_rate,
+            now,
+            now,
         )
-        
+
         return result
     
     async def get_user_transactions(
@@ -182,7 +211,7 @@ class TransactionService:
         """Update transaction status, category, and tax flags"""
         
         updates = ["updated_at = $1"]
-        params: List[Any] = [datetime.utcnow()]
+        params: List[Any] = [utc_now()]
         param_count = 2
         
         if status is not None:
@@ -246,9 +275,14 @@ class TransactionService:
         result = await db_service.execute_command(query, transaction_id, user_id)
         return "DELETE 1" in result
     
-    async def get_transaction_summary(self, user_id: uuid.UUID) -> Dict[str, Any]:
-        """Get comprehensive transaction summary for dashboard"""
-        
+    async def get_transaction_summary(
+        self,
+        user_id: uuid.UUID,
+        currency: str = DEFAULT_CURRENCY,
+    ) -> Dict[str, Any]:
+        """Get comprehensive transaction summary for dashboard (single currency)."""
+        currency = normalize_currency(currency)
+
         # Main summary query
         summary_query = """
             SELECT 
@@ -261,10 +295,10 @@ class TransactionService:
                 SUM(amount) as net_amount,
                 AVG(ai_confidence) as avg_confidence
             FROM transactions 
-            WHERE user_id = $1
+            WHERE user_id = $1 AND currency = $2
         """
         
-        summary = await db_service.execute_one(summary_query, user_id)
+        summary = await db_service.execute_one(summary_query, user_id, currency)
         
         # Category breakdown
         category_query = """
@@ -275,12 +309,12 @@ class TransactionService:
                 AVG(amount) as avg_amount,
                 AVG(ai_confidence) as avg_confidence
             FROM transactions 
-            WHERE user_id = $1 AND category IS NOT NULL
+            WHERE user_id = $1 AND currency = $2 AND category IS NOT NULL
             GROUP BY category
             ORDER BY ABS(SUM(amount)) DESC
         """
         
-        categories = await db_service.execute_query(category_query, user_id)
+        categories = await db_service.execute_query(category_query, user_id, currency)
         
         # Monthly trends (last 12 months)
         monthly_query = """
@@ -292,27 +326,29 @@ class TransactionService:
                 SUM(amount) as net
             FROM transactions 
             WHERE user_id = $1 
+                AND currency = $2
                 AND transaction_date >= CURRENT_DATE - INTERVAL '12 months'
             GROUP BY DATE_TRUNC('month', transaction_date)
             ORDER BY month DESC
         """
         
-        monthly_trends = await db_service.execute_query(monthly_query, user_id)
+        monthly_trends = await db_service.execute_query(monthly_query, user_id, currency)
         
         # Recent transactions
         recent_query = """
             SELECT id, merchant_name, amount, currency, transaction_date,
                    category, status, source, ai_confidence
             FROM transactions 
-            WHERE user_id = $1
+            WHERE user_id = $1 AND currency = $2
             ORDER BY transaction_date DESC, created_at DESC
             LIMIT 10
         """
         
-        recent_transactions = await db_service.execute_query(recent_query, user_id)
+        recent_transactions = await db_service.execute_query(recent_query, user_id, currency)
         
         return {
             "summary": summary,
+            "currency": currency,
             "categories": categories,
             "monthly_trends": monthly_trends,
             "recent_transactions": recent_transactions
@@ -338,7 +374,7 @@ class TransactionService:
             params.extend([
                 uuid.UUID(update['transaction_id']),
                 update['category'],
-                datetime.utcnow()
+                utc_now()
             ])
             param_count += 3
         
@@ -366,10 +402,12 @@ class TransactionService:
         self,
         user_id: uuid.UUID,
         start_date: date,
-        end_date: date
+        end_date: date,
+        currency: str = DEFAULT_CURRENCY,
     ) -> Dict[str, Any]:
         """Get detailed spending analytics for a date range"""
-        
+        currency = normalize_currency(currency)
+
         query = """
             WITH daily_spending AS (
                 SELECT 
@@ -380,6 +418,7 @@ class TransactionService:
                     COUNT(*) as transaction_count
                 FROM transactions 
                 WHERE user_id = $1 
+                    AND currency = $4
                     AND transaction_date BETWEEN $2 AND $3
                 GROUP BY transaction_date, category
             ),
@@ -431,7 +470,9 @@ class TransactionService:
             FROM daily_totals
         """
         
-        results = await db_service.execute_query(query, user_id, start_date, end_date)
+        results = await db_service.execute_query(
+            query, user_id, start_date, end_date, currency
+        )
         
         # Process results into structured format
         analytics = {}

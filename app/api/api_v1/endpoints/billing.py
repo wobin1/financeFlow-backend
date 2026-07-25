@@ -55,7 +55,7 @@ async def create_checkout(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Paystack error: {str(e)}",
+            detail="Payment provider error",
         )
 
 
@@ -73,7 +73,7 @@ async def verify_payment(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Verification failed: {str(e)}",
+            detail="Payment verification failed",
         )
 
 
