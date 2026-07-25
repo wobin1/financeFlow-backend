@@ -36,7 +36,11 @@ CREATE TABLE IF NOT EXISTS users (
 
     -- Admin
     role VARCHAR(32) NOT NULL DEFAULT 'user',
-    
+
+    -- Email verification
+    email_verified BOOLEAN NOT NULL DEFAULT false,
+    email_verified_at TIMESTAMP WITH TIME ZONE,
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -46,6 +50,19 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
 CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+-- Single-use, expiring, hashed tokens for email verification and password reset
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    purpose VARCHAR(32) NOT NULL,
+    token_hash VARCHAR(64) NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    used_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_tokens_hash ON auth_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_purpose ON auth_tokens(user_id, purpose);
 
 -- Transaction status enum
 CREATE TYPE transaction_status AS ENUM ('pending', 'confirmed', 'rejected', 'flagged');

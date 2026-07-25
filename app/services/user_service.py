@@ -25,6 +25,7 @@ class UserService:
         business_type: Optional[str] = None,
         country: str = "NG",
         currency: str = "NGN",
+        email_verified: bool = False,
     ) -> Dict[str, Any]:
         """Create a new user"""
         email = self._normalize_email(email)
@@ -41,12 +42,14 @@ class UserService:
             INSERT INTO users (
                 id, email, full_name, hashed_password, phone_number,
                 business_name, cac_number, tin_number, business_type,
-                country, currency, is_active, created_at, updated_at
+                country, currency, is_active, email_verified, email_verified_at,
+                created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
             )             RETURNING id, email, full_name, phone_number, business_name,
                        cac_number, tin_number, business_type, country,
-                       currency, is_active, role, created_at
+                       currency, is_active, email_verified, email_verified_at,
+                       role, created_at
         """
 
         now = utc_now()
@@ -64,6 +67,8 @@ class UserService:
             country,
             currency,
             True,
+            email_verified,
+            now if email_verified else None,
             now,
             now,
         )
@@ -75,7 +80,8 @@ class UserService:
         query = """
             SELECT id, email, full_name, hashed_password, phone_number,
                    business_name, cac_number, tin_number, business_type,
-                   country, currency, is_active, plaid_access_token,
+                   country, currency, is_active, email_verified, email_verified_at,
+                   plaid_access_token,
                    plan, subscription_status, paystack_customer_code,
                    paystack_subscription_code, paystack_authorization_code,
                    plan_period_end, plan_updated_at, role,
@@ -91,7 +97,8 @@ class UserService:
         query = """
             SELECT id, email, full_name, phone_number, business_name,
                    cac_number, tin_number, business_type, country,
-                   currency, is_active, plaid_access_token,
+                   currency, is_active, email_verified, email_verified_at,
+                   plaid_access_token,
                    plan, subscription_status, paystack_customer_code,
                    paystack_subscription_code, paystack_authorization_code,
                    plan_period_end, plan_updated_at, role,
@@ -222,4 +229,28 @@ class UserService:
             WHERE id = $3
         """
         result = await db_service.execute_command(query, is_active, utc_now(), user_id)
+        return "UPDATE 1" in result
+
+    async def mark_email_verified(self, user_id: uuid.UUID) -> bool:
+        """Mark a user's email as verified (idempotent)."""
+        now = utc_now()
+        query = """
+            UPDATE users
+            SET email_verified = true,
+                email_verified_at = COALESCE(email_verified_at, $1),
+                updated_at = $1
+            WHERE id = $2
+        """
+        result = await db_service.execute_command(query, now, user_id)
+        return "UPDATE 1" in result
+
+    async def set_password(self, user_id: uuid.UUID, new_password: str) -> bool:
+        """Hash and store a new password."""
+        hashed_password = get_password_hash(new_password)
+        query = """
+            UPDATE users
+            SET hashed_password = $1, updated_at = $2
+            WHERE id = $3
+        """
+        result = await db_service.execute_command(query, hashed_password, utc_now(), user_id)
         return "UPDATE 1" in result
